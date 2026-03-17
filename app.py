@@ -1,5 +1,5 @@
 """
-app.py — Streamlit web interface for the Leaf Adjuvant Analyser.
+app.py — Streamlit web interface for the WSP Adjuvant Analyser.
 
 Run locally:
     streamlit run app.py
@@ -99,7 +99,7 @@ def build_report_png(images_rgb, results, computed, grid_n: int) -> bytes:
     ax_chart.set_title("Droplet Size Distribution", fontsize=9)
     ax_chart.legend(fontsize=8)
 
-    fig.suptitle("Leaf Adjuvant Effectiveness Analysis Report",
+    fig.suptitle("WSP Adjuvant Effectiveness Analysis Report",
                  fontsize=13, fontweight="bold")
 
     buf = io.BytesIO()
@@ -113,8 +113,8 @@ def build_report_png(images_rgb, results, computed, grid_n: int) -> bytes:
 # Page
 # ---------------------------------------------------------------------------
 
-st.set_page_config(page_title="Leaf Adjuvant Analyser", layout="wide")
-st.title("Leaf Adjuvant Analyser")
+st.set_page_config(page_title="WSP Adjuvant Analyser", layout="wide")
+st.title("Adjuvant Spray Analyser — Water-Sensitive Paper")
 
 # --- Sidebar controls -------------------------------------------------------
 with st.sidebar:
@@ -123,18 +123,18 @@ with st.sidebar:
     grid_n    = st.number_input("Grid size", min_value=4, max_value=16,
                                 value=8, step=2)
     st.markdown("---")
-    st.caption("Threshold controls spray-contact sensitivity. "
-               "Grid size sets the uniformity calculation resolution.")
+    st.caption("Threshold controls minimum colour saturation for blue-droplet detection. "
+               "Grid size sets uniformity resolution.")
 
 # --- Image upload -----------------------------------------------------------
 col1, col2 = st.columns(2)
 with col1:
-    st.subheader("Image 1 — No Adjuvant")
+    st.subheader("Paper 1 — No Adjuvant")
     upload1 = st.file_uploader("Upload image 1",
                                type=["jpg", "jpeg", "png", "bmp", "tiff", "tif"],
                                key="upload1", label_visibility="collapsed")
 with col2:
-    st.subheader("Image 2 — With Adjuvant")
+    st.subheader("Paper 2 — With Adjuvant")
     upload2 = st.file_uploader("Upload image 2",
                                type=["jpg", "jpeg", "png", "bmp", "tiff", "tif"],
                                key="upload2", label_visibility="collapsed")
@@ -217,9 +217,9 @@ if any(r is not None for r in results):
     st.download_button(
         label="Download Report (PNG)",
         data=report_bytes,
-        file_name="leaf_adjuvant_report.png",
+        file_name="wsp_adjuvant_report.png",
         mime="image/png",
     )
 
 else:
-    st.info("Upload at least one image above to begin analysis.")
+    st.info("Upload at least one WSP image above to begin analysis.")

@@ -1,5 +1,5 @@
 """
-analyser.py — Image-analysis pipeline for the Leaf Adjuvant Analyser.
+analyser.py — Image-analysis pipeline for the WSP Adjuvant Analyser.
 
 Uses scikit-image (skimage) + numpy + Pillow instead of OpenCV, because
 opencv-python has no pre-built wheel for Python 3.14 ARM64 as of mid-2025.
@@ -7,6 +7,9 @@ opencv-python has no pre-built wheel for Python 3.14 ARM64 as of mid-2025.
 All functions are pure (no GUI, no I/O).  The top-level entry point is
 analyse_image(), which accepts an RGB uint8 numpy array and returns an
 AnalysisResult.
+
+Input type: water-sensitive paper (WSP) photographed in a controlled dark box.
+WSP turns blue where spray droplets land; uncontacted areas remain bright yellow.
 """
 
 from dataclasses import dataclass, field
@@ -34,87 +37,45 @@ class AnalysisResult:
 
 
 # ---------------------------------------------------------------------------
-# Step 1 — Leaf segmentation
+# Step 1 — Paper segmentation
 # ---------------------------------------------------------------------------
 
-def segment_leaf(image_rgb: np.ndarray) -> np.ndarray:
+def segment_paper(image_rgb: np.ndarray) -> np.ndarray:
     """
-    Return a boolean mask that isolates the leaf from the background.
+    Return a boolean mask covering the entire WSP image frame.
+
+    WSP images are taken in a controlled dark box; the whole frame is paper,
+    so no background segmentation is needed.
+    """
+    h, w = image_rgb.shape[:2]
+    return np.ones((h, w), dtype=bool)
+
+
+# ---------------------------------------------------------------------------
+# Step 2 — Blue-droplet detection
+# ---------------------------------------------------------------------------
+
+def detect_droplets(image_rgb: np.ndarray, paper_mask: np.ndarray,
+                    threshold: int = 30) -> np.ndarray:
+    """
+    Return a boolean mask of blue spray-droplet pixels on WSP.
 
     Strategy:
-      1. Convert to HSV (skimage: all channels in [0, 1]).
-      2. Threshold on green hue, non-trivial saturation and value.
-      3. Morphological close then open to fill gaps and remove speckle.
-      4. Keep only the largest connected component (the main leaf).
+      - Convert to HSV colour space (skimage: all channels [0, 1]).
+      - Blue hue band: H ≈ 0.50–0.75 (180°–270° on the colour wheel).
+      - threshold slider (5–100) controls minimum saturation:
+            min_sat = threshold / 100.0
+        Lower threshold = catch faint/light spray; higher = only vivid blue.
+      - Require minimum value (v ≥ 0.05) to exclude near-black pixels.
+      - Light morphological open/close to clean up noise.
     """
     img_float = image_rgb.astype(np.float64) / 255.0
     hsv = color.rgb2hsv(img_float)
+    h, s, v = hsv[..., 0], hsv[..., 1], hsv[..., 2]
 
-    h, s, v = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+    min_sat = threshold / 100.0
 
-    # skimage HSV: H in [0, 1], green ≈ 0.33
-    # Range 0.18–0.55 covers yellow-green through teal-green
-    mask = (
-        (h >= 0.18) & (h <= 0.55) &
-        (s >= 0.10) &
-        (v >= 0.10)
-    )
-
-    # Morphological cleanup — fill holes, remove isolated specks
-    disk_close = morphology.disk(15)
-    disk_open  = morphology.disk(10)
-    mask = morphology.closing(mask, disk_close)
-    mask = morphology.opening(mask, disk_open)
-
-    # Keep only the largest connected component
-    labeled = measure.label(mask, connectivity=2)
-    if labeled.max() == 0:
-        # Nothing detected — use the full image so the pipeline doesn't crash
-        return np.ones(mask.shape, dtype=bool)
-
-    regions = measure.regionprops(labeled)
-    largest = max(regions, key=lambda r: r.area)
-    return labeled == largest.label
-
-
-# ---------------------------------------------------------------------------
-# Step 2 — Wet-area / spray-contact detection
-# ---------------------------------------------------------------------------
-
-def detect_wet_areas(image_rgb: np.ndarray, leaf_mask: np.ndarray,
-                     threshold: int = 30) -> np.ndarray:
-    """
-    Return a boolean mask of spray-contacted leaf pixels.
-
-    Strategy:
-      - Convert to LAB colour space (perceptually uniform).
-        skimage LAB: L in [0, 100], A/B in [-128, 127].
-      - Compute the 75th-percentile L value of leaf pixels as a proxy for
-        "bare leaf" brightness.
-      - Pixels whose L value deviates from that reference by more than the
-        scaled threshold are classified as "contacted".
-      - Light morphological open/close to clean up noise.
-
-    threshold (int, 5–100): GUI slider value.  Mapped to LAB L units via
-        lab_threshold = threshold × 100 / 255
-    so that the default of 30 corresponds to ~11.8 LAB L units — equivalent
-    to the cv2 LAB scale the design was originally specified around.
-    """
-    img_float = image_rgb.astype(np.float64) / 255.0
-    lab = color.rgb2lab(img_float)
-    l_channel = lab[:, :, 0]           # [0, 100]
-
-    # Scale from slider range (0–100) to LAB L units
-    lab_threshold = threshold * 100.0 / 255.0
-
-    leaf_l = l_channel[leaf_mask]
-    if leaf_l.size == 0:
-        return np.zeros_like(leaf_mask, dtype=bool)
-
-    bare_ref = float(np.percentile(leaf_l, 75))
-
-    diff = np.abs(l_channel - bare_ref)
-    contacted = (diff > lab_threshold) & leaf_mask
+    contacted = (h >= 0.50) & (h <= 0.75) & (s >= min_sat) & (v >= 0.05) & paper_mask
 
     # Morphological cleanup
     disk_small = morphology.disk(3)
@@ -179,18 +140,14 @@ def size_histogram(blob_stats: List[Tuple[int, float]]) -> Tuple[int, int, int]:
 # ---------------------------------------------------------------------------
 
 def create_overlay(image_rgb: np.ndarray, contacted_mask: np.ndarray,
-                   leaf_mask: np.ndarray) -> np.ndarray:
+                   paper_mask: np.ndarray) -> np.ndarray:
     """
     Render a visual overlay (RGB uint8):
-      - Dimmed non-leaf background so the leaf stands out.
-      - Semi-transparent green fill over contacted areas.
+      - Original yellow paper background (no dimming — entire frame is paper).
+      - Semi-transparent green fill over detected blue droplet areas.
       - Red contour lines around individual droplet blobs.
     """
     base = image_rgb.astype(np.float64)
-
-    # Dim the background
-    bg = ~leaf_mask
-    base[bg] *= 0.40
 
     # Semi-transparent green for contacted region
     green = np.zeros_like(base)
@@ -219,19 +176,20 @@ def create_overlay(image_rgb: np.ndarray, contacted_mask: np.ndarray,
 
 def analyse_image(image_rgb: np.ndarray, threshold: int = 30) -> AnalysisResult:
     """
-    Full analysis pipeline.
+    Full WSP analysis pipeline.
 
     image_rgb: RGB uint8 numpy array (H × W × 3).
-    threshold: wet-area detection sensitivity (GUI slider, 5–100).
+    threshold: blue-droplet detection sensitivity — controls minimum HSV
+               saturation (GUI slider, 5–100).
     """
-    leaf_mask      = segment_leaf(image_rgb)
-    contacted_mask = detect_wet_areas(image_rgb, leaf_mask, threshold)
+    paper_mask     = segment_paper(image_rgb)
+    contacted_mask = detect_droplets(image_rgb, paper_mask, threshold)
     blob_stats, droplet_count, mean_diameter = analyse_blobs(contacted_mask)
     bins           = size_histogram(blob_stats)
-    overlay        = create_overlay(image_rgb, contacted_mask, leaf_mask)
+    overlay        = create_overlay(image_rgb, contacted_mask, paper_mask)
 
     return AnalysisResult(
-        leaf_mask      = leaf_mask,
+        leaf_mask      = paper_mask,
         contacted_mask = contacted_mask,
         overlay_image  = overlay,
         blob_stats     = blob_stats,
