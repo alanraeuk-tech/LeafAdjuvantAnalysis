@@ -32,7 +32,9 @@ METRIC_KEYS = [
 ]
 
 BIN_LABELS = ["Small (<20 px)", "Medium (20–50 px)", "Large (≥50 px)"]
-BAR_COLORS = ["#e74c3c", "#2ecc71"]
+BAR_COLORS = ["#8f9397", "#4cbd89"]   # grey = No Adjuvant, teal = With Adjuvant
+
+LOGO_URL = "https://www.desangosse.co.uk/assets/images/desangosse-logo-final.svg"
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +102,7 @@ def build_report_png(images_rgb, results, computed, grid_n: int) -> bytes:
     ax_chart.legend(fontsize=8)
 
     fig.suptitle("WSP Adjuvant Effectiveness Analysis Report",
-                 fontsize=13, fontweight="bold")
+                 fontsize=13, fontweight="bold", color="#0C6951")
 
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
@@ -114,10 +116,64 @@ def build_report_png(images_rgb, results, computed, grid_n: int) -> bytes:
 # ---------------------------------------------------------------------------
 
 st.set_page_config(page_title="WSP Adjuvant Analyser", layout="wide")
-st.title("Adjuvant Spray Analyser — Water-Sensitive Paper")
+
+st.markdown("""
+<style>
+/* Branded top accent bar on main content */
+.brand-header {
+    border-top: 4px solid #4cbd89;
+    padding: 0.75rem 0 0.5rem 0;
+    margin-bottom: 0.5rem;
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+}
+/* Metric card tinting */
+[data-testid="stMetric"] {
+    background: #f0f4f2;
+    border-radius: 8px;
+    padding: 0.6rem 1rem !important;
+}
+/* Subtle section divider label */
+.section-label {
+    font-size: 0.78rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #8f9397;
+    margin-bottom: 0.25rem;
+}
+/* Footer */
+.ds-footer {
+    margin-top: 2.5rem;
+    border-top: 1px solid #dfe2e5;
+    padding-top: 0.75rem;
+    font-size: 0.78rem;
+    color: #8f9397;
+    text-align: center;
+}
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown(f"""
+<div class="brand-header">
+  <img src="{LOGO_URL}" height="54" alt="De Sangosse">
+  <div>
+    <div style="font-size:1.6rem;font-weight:700;color:#343a40;line-height:1.2;">
+        Adjuvant Spray Analyser
+    </div>
+    <div style="font-size:0.9rem;color:#8f9397;">Water-Sensitive Paper (WSP) Analysis</div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
 
 # --- Sidebar controls -------------------------------------------------------
 with st.sidebar:
+    st.markdown(
+        f'<img src="{LOGO_URL}" style="width:100%;max-width:160px;margin-bottom:0.75rem;" alt="De Sangosse">',
+        unsafe_allow_html=True,
+    )
+    st.markdown("---")
     st.header("Parameters")
     threshold = st.slider("Threshold", min_value=5, max_value=100, value=30)
     grid_n    = st.number_input("Grid size", min_value=4, max_value=16,
@@ -164,7 +220,7 @@ if any(r is not None for r in results):
                          caption=f"{label} — Overlay",
                          use_container_width=True)
 
-    # --- Metrics table ------------------------------------------------------
+    # --- Metrics cards ------------------------------------------------------
     st.markdown("---")
     st.subheader("Results")
 
@@ -173,16 +229,20 @@ if any(r is not None for r in results):
         if results[slot] is not None:
             computed[slot] = compute_metrics(results[slot], int(grid_n))
 
-    table_data = {"Metric": [], "No Adjuvant": [], "With Adjuvant": []}
-    for key, label, fmt in METRIC_KEYS:
-        table_data["Metric"].append(label)
-        table_data["No Adjuvant"].append(
-            fmt(computed[0][key]) if computed[0] else "—"
-        )
-        table_data["With Adjuvant"].append(
-            fmt(computed[1][key]) if computed[1] else "—"
-        )
-    st.table(table_data)
+    st.markdown('<div class="section-label">Paper 1 — No Adjuvant</div>', unsafe_allow_html=True)
+    cols = st.columns(len(METRIC_KEYS))
+    for col, (key, label, fmt) in zip(cols, METRIC_KEYS):
+        col.metric(label, fmt(computed[0][key]) if computed[0] else "—")
+
+    st.markdown('<div class="section-label">Paper 2 — With Adjuvant</div>', unsafe_allow_html=True)
+    cols = st.columns(len(METRIC_KEYS))
+    for col, (key, label, fmt) in zip(cols, METRIC_KEYS):
+        v1 = computed[1][key] if computed[1] else None
+        v0 = computed[0][key] if computed[0] else None
+        delta_str = None
+        if v1 is not None and v0 is not None:
+            delta_str = f"{v1 - v0:+.1f}"
+        col.metric(label, fmt(v1) if v1 is not None else "—", delta=delta_str)
 
     # Highlight which image scored better
     if computed[0] and computed[1]:
@@ -223,3 +283,8 @@ if any(r is not None for r in results):
 
 else:
     st.info("Upload at least one WSP image above to begin analysis.")
+
+st.markdown(
+    '<div class="ds-footer">De Sangosse WSP Adjuvant Analysis Tool</div>',
+    unsafe_allow_html=True,
+)
