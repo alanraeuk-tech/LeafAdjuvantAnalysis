@@ -61,26 +61,26 @@ def detect_droplets(image_rgb: np.ndarray, paper_mask: np.ndarray,
     Return a boolean mask of blue spray-droplet pixels on WSP.
 
     Strategy:
-      - Convert to HSV colour space (skimage: all channels [0, 1]).
-      - Blue hue band: H ≈ 0.50–0.75 (180°–270° on the colour wheel).
-      - threshold slider (5–100) controls minimum saturation:
-            min_sat = threshold / 100.0
-        Lower threshold = catch faint/light spray; higher = only vivid blue.
-      - Require minimum value (v ≥ 0.05) to exclude near-black pixels.
-      - Light morphological open/close to clean up noise.
+      - Convert to LAB colour space.
+      - WSP paper is yellow (high b*); spray droplets shift toward blue/dark
+        (lower b*), whether vivid blue or near-black concentrated spots.
+      - Use the 90th-percentile b* of paper pixels as the "dry yellow" reference.
+      - Mark any pixel whose b* falls more than `threshold` units below that
+        reference as contacted.  Lower threshold = more sensitive.
+      - Small morphological closing (disk 1) to fill single-pixel gaps inside
+        droplets without destroying small spots.
     """
     img_float = image_rgb.astype(np.float64) / 255.0
-    hsv = color.rgb2hsv(img_float)
-    h, s, v = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+    lab = color.rgb2lab(img_float)
+    b_star = lab[..., 2]   # positive = yellow, negative/low = blue
 
-    min_sat = threshold / 100.0
+    # Reference: the bright yellow paper colour (top 90th percentile of b*)
+    paper_b_ref = np.percentile(b_star[paper_mask], 90)
 
-    contacted = (h >= 0.50) & (h <= 0.75) & (s >= min_sat) & (v >= 0.05) & paper_mask
+    contacted = (b_star < paper_b_ref - threshold) & paper_mask
 
-    # Morphological cleanup
-    disk_small = morphology.disk(3)
-    contacted = morphology.opening(contacted, disk_small)
-    contacted = morphology.closing(contacted, disk_small)
+    # Closing only: fill small gaps without eroding small spots
+    contacted = morphology.closing(contacted, morphology.disk(1))
 
     return contacted
 
