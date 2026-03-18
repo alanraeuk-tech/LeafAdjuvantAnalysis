@@ -35,6 +35,7 @@ BIN_LABELS = ["Small (<20 px)", "Medium (20–50 px)", "Large (≥50 px)"]
 BAR_COLORS = ["#8f9397", "#4cbd89"]   # grey = No Adjuvant, teal = With Adjuvant
 
 LOGO_URL = "https://www.desangosse.co.uk/assets/images/desangosse-logo-final.svg"
+APP_VERSION = "1.1"
 
 
 # ---------------------------------------------------------------------------
@@ -215,10 +216,10 @@ if any(r is not None for r in results):
         with panel:
             if images_rgb[slot] is not None:
                 st.image(images_rgb[slot], caption=f"{label} — Original",
-                         use_container_width=True)
+                         width=400)
                 st.image(results[slot].overlay_image,
                          caption=f"{label} — Overlay",
-                         use_container_width=True)
+                         width=400)
 
     # --- Metrics cards ------------------------------------------------------
     st.markdown("---")
@@ -285,6 +286,6 @@ else:
     st.info("Upload at least one WSP image above to begin analysis.")
 
 st.markdown(
-    '<div class="ds-footer">De Sangosse WSP Adjuvant Analysis Tool</div>',
+    f'<div class="ds-footer">De Sangosse WSP Adjuvant Analysis Tool &nbsp;·&nbsp; v{APP_VERSION}</div>',
     unsafe_allow_html=True,
 )
