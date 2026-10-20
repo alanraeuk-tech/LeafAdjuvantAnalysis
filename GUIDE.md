@@ -1,159 +1,96 @@
-# Leaf Adjuvant Analyser — User Guide
+# WSP Adjuvant Analyser: User Guide
 
-## What It Does
+## What it does
 
-The Leaf Adjuvant Analyser is a desktop application for comparing how effectively an adjuvant (a spray additive) improves pesticide or liquid coverage on a leaf. You load two photos of a leaf — one sprayed **without** adjuvant and one sprayed **with** adjuvant — and the tool measures and visualises the spray contact on each.
-
----
-
-## Running the App
+Compares how a spray lands with and without an adjuvant, using water-sensitive paper (WSP). WSP is yellow and turns blue wherever a droplet hits it. You upload a photo or scan of a card sprayed without the adjuvant and one sprayed with it, and the tool measures the stains on each and puts the figures side by side.
 
 ```bash
-cd LeafAdjuvantAnalysis
-python main.py
+streamlit run app.py
 ```
 
 ---
 
-## Window Layout
+## Getting good images
 
-```
-┌─────────────────────┬─────────────────────┬──────────────────┐
-│  Image 1            │  Image 2            │  Results         │
-│  (No Adjuvant)      │  (With Adjuvant)    │                  │
-│                     │                     │  Metrics table   │
-│  [Original photo]   │  [Original photo]   │                  │
-│                     │                     │  Droplet size    │
-│  [Analysis overlay] │  [Analysis overlay] │  bar chart       │
-├─────────────────────┴─────────────────────┴──────────────────┤
-│  Threshold: ──●──────  Grid size: [8]  [Analyse] [Save Report]│
-└──────────────────────────────────────────────────────────────┘
-```
+This matters more than any setting in the app.
 
-The window has three columns and a bottom bar.
+- **Scan rather than photograph if you can**, at **600 dpi or better** (1200 dpi is ideal). A phone photo of a whole card is usually around 100 µm per pixel, which can't see fine droplets at all. The app warns you when resolution is too low.
+- **Crop to the card edges.** The app works out the scale from the card size, so any background left in the image throws the micron figures off. The app warns if the image shape doesn't match the card.
+- Even lighting, no shadows, no glare. Handle cards by the edges with dry gloves.
+- Spray at a rate that gives under about 30% coverage if you want droplet sizes. Above that, stains overlap so much that sizing becomes guesswork. Coverage itself stays reliable.
 
 ---
 
-## Controls
+## Settings (sidebar)
 
-### Load Image buttons
+### Card size
+Width and height of the card in mm. Standard cards are 26 × 76 mm. If you cut cards down, enter the cut size.
 
-Each image column has a **Load Image 1** / **Load Image 2** button at the top.
+### Sensitivity threshold (default 35)
+How different from the paper colour a pixel must be to count as stained, measured as colour distance (ΔE). Lower picks up fainter stains but also smudges and shadows; higher misses faint fine droplets. Check the overlay: red outlines should hug the visible stains.
 
-- Opens a file browser — supports JPG, PNG, BMP, TIFF.
-- The photo appears in the upper half of its column.
-- The lower half shows "Not analysed yet" until you run analysis.
-- You can reload a different image at any time.
+### Ignore stains smaller than (default 2 px)
+Noise floor. Raise it if dust or paper texture is being counted.
 
----
+### Separate overlapping stains (default on)
+Where two droplets landed on top of each other, splits the merged stain at its narrow point so each is counted. Turn off to count stains exactly as they appear.
 
-### Threshold slider (bottom bar)
+### Evenness cell size (default 5 mm)
+Grid size used for the coverage CV figure.
 
-- **Range:** 5 – 100  (default: 30)
-- Controls the **sensitivity** of spray-contact detection.
-  - **Low value (e.g. 5–15):** Very sensitive — small brightness differences from the bare leaf are treated as spray contact. May over-detect on uneven or textured leaves.
-  - **High value (e.g. 60–100):** Only strong, obvious wet patches are detected. May under-detect light or fine misting.
-- The numeric readout next to the slider updates as you drag.
-- If both images are loaded, analysis re-runs automatically ~0.6 s after you stop moving the slider.
-
-**How it works internally:** The image is converted to LAB colour space. The 75th-percentile lightness of the leaf pixels is used as a "dry leaf" reference. Pixels whose lightness deviates from that reference by more than the threshold are marked as contacted.
+### Spread factor (default 1.0)
+A droplet spreads when it hits the paper, so the stain is bigger than the droplet. At 1.0 the app reports stain sizes. If you have a calibrated spread factor for your paper and liquid, enter it and sizes become droplet sizes (stain ÷ factor). Note an adjuvant usually changes the spread factor, which is part of what you're measuring.
 
 ---
 
-### Grid size spinbox (bottom bar)
+## The overlay
 
-- **Range:** 4 – 16, step 2  (default: 8)
-- Controls how finely the leaf is divided for the **Uniformity** calculation.
-- The leaf is split into a *grid_n × grid_n* grid of cells. Uniformity measures how evenly spray contact is spread across those cells.
-- **Smaller grid (e.g. 4):** Coarser spatial resolution — less sensitive to local clustering.
-- **Larger grid (e.g. 16):** Finer resolution — better at detecting uneven patches but may be noisy on small leaves or low coverage.
-- Changing the grid size re-triggers analysis automatically (same 0.6 s debounce as the threshold).
+Each card shows the original next to the detected version:
 
----
-
-### Analyse button
-
-Runs the full analysis pipeline on both loaded images using the current threshold and grid-size settings. Results update in the right-hand panel and the overlay images are drawn.
-
-You can click this manually at any time. It is also triggered automatically when you adjust the threshold or grid size (with a short debounce delay).
-
----
-
-### Save Report button
-
-Exports a summary report as a **PNG** or **PDF** file. The report contains:
-
-- Original and overlay images for both slots (side by side)
-- A formatted metrics comparison table
-- The droplet size distribution bar chart
-
-You must run analysis before saving. A file-save dialog lets you choose the destination and format.
-
----
-
-## Analysis Overlay
-
-After analysis, the lower canvas in each image column shows the overlay:
-
-| Visual element | Meaning |
+| You see | Meaning |
 |---|---|
-| Dimmed area | Background (outside the leaf) |
-| Normal leaf colour | Leaf area with no detected spray contact |
-| Green tint | Spray-contacted region |
-| Red outlines | Borders of individual spray droplet blobs |
+| Green tint | Area counted as stained |
+| Red outline | Edge of each droplet, including split lines between merged ones |
+| Plain yellow | Paper with no stain detected |
 
 ---
 
-## Metrics Table (Results panel)
+## Results
 
-| Metric | Description |
+| Metric | What it means |
 |---|---|
-| **Coverage %** | Percentage of the leaf area showing spray contact |
-| **Droplets** | Number of individual spray-contact blobs detected (min 10 px area each) |
-| **Mean diam (px)** | Average equivalent circular diameter of the blobs, in pixels |
-| **Uniformity** | 0–1 score: how evenly spray is spread across the leaf (1 = perfectly even) |
-| **Eff. Score** | Effectiveness score 0–100, calculated as Coverage % × Uniformity |
+| **Coverage** | % of the card that's stained. The most reliable figure. |
+| **Droplet density** | Droplets per cm². Label recommendations are often given in this form. |
+| **Droplets (after split)** | Count after separating overlaps. |
+| **Stains (as seen)** | Count of separate blue patches before splitting. |
+| **Coverage in merged stains** | Share of the stained area in patches that contained more than one droplet. A big rise with adjuvant usually means droplets are spreading further on contact. |
+| **Dv0.1 / Dv0.5 / Dv0.9** | 10%, 50% and 90% of the spray *volume* is in stains smaller than this. Dv0.5 is the volume median diameter (VMD), the standard headline droplet-size figure. |
+| **NMD** | Number median diameter: half the droplets are smaller than this. Much lower than VMD because lots of small droplets carry little volume. |
+| **Relative span** | (Dv0.9 − Dv0.1) / Dv0.5. Lower means more uniform droplet sizes. |
+| **Coverage CV** | How unevenly coverage is spread across the card. Lower is more even. |
 
-When both images are analysed, the **Eff. Score** cells are colour-coded:
-- **Green** — the better-performing image
-- **Red** — the lower-performing image
+Where both cards are loaded, a **Change** column shows the difference. Percentage metrics show the change in points (20% → 44% is +24 pts), everything else as a relative change.
 
----
+The chart plots cumulative spray volume against stain size for both cards. The further right a curve sits, the bigger the stains.
 
-## Droplet Size Distribution Chart
+### Warnings
 
-A grouped bar chart comparing the two images across three size bins:
-
-| Bin | Diameter range |
-|---|---|
-| Small | < 20 px |
-| Medium | 20 – 49 px |
-| Large | ≥ 50 px |
-
-Red bars = No Adjuvant, Green bars = With Adjuvant.
+Yellow warnings under each image tell you when the figures shouldn't be trusted: low resolution, image not cropped to the card, or very high coverage. They're also printed on the downloaded report.
 
 ---
 
-## Analysis Pipeline (Technical Summary)
+## Downloads
 
-1. **Leaf segmentation** — converts to HSV colour space and thresholds on green hue (0.18–0.55), saturation ≥ 0.10, and value ≥ 0.10. Morphological closing and opening clean up the mask. Only the largest connected component is kept as the leaf region.
-
-2. **Wet-area detection** — converts to LAB colour space. The 75th-percentile lightness of leaf pixels is the "dry leaf" reference. Pixels deviating from this by more than the scaled threshold are classified as spray-contacted, then cleaned with a small morphological open/close.
-
-3. **Blob analysis** — connected components in the contacted mask are labelled. Blobs smaller than 10 px are ignored. Per-blob area and equivalent diameter are recorded.
-
-4. **Metrics** — Coverage % is contacted pixels / leaf pixels. Uniformity uses normalised Shannon entropy over a spatial grid. Effectiveness Score = Coverage % × Uniformity.
-
-5. **Overlay rendering** — background dimmed to 40%, contacted region blended with a green channel, blob contours drawn in red.
+- **Report (PNG):** both cards, overlays, metrics table, chart and any warnings on one page.
+- **Figures (CSV):** the raw numbers, for spreadsheets.
 
 ---
 
-## Dependencies
+## How the analysis works
 
-| Package | Purpose |
-|---|---|
-| `scikit-image` | Colour-space conversion, morphology, connected-component analysis |
-| `numpy` | Array operations |
-| `matplotlib` | Bar chart and report export |
-| `Pillow` | Image loading, overlay drawing |
-| `tkinter` | GUI (standard library, no install needed) |
+1. **Trim** a 3 px frame off the image to remove scanner and crop edges.
+2. **Find the paper colour:** the median colour of the clearly yellow pixels.
+3. **Find stains** in two passes. Globally, any pixel more than the threshold ΔE from the paper colour. Locally, small isolated specks that are faint overall but clearly darker than the paper right around them (fine droplets on lower-resolution images). The local pass only adds small isolated specks, so it can't inflate big stains.
+4. **Separate merged stains** with a watershed on the distance transform, so overlapping round stains are cut at their waist. Seeds that are too close to be separate droplets are merged so irregular single stains aren't shredded.
+5. **Measure** each droplet's equivalent circular diameter and convert to µm using the card size.
+6. **Metrics:** volume percentiles use diameter³ as volume, so a few big stains dominate Dv0.5.
