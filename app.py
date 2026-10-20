@@ -1,5 +1,5 @@
 """
-app.py — Streamlit web interface for the WSP Adjuvant Analyser.
+app.py — Streamlit interface for the WSP Adjuvant Analyser.
 
 Run locally:
     streamlit run app.py
@@ -7,109 +7,150 @@ Run locally:
 Deploy: push to GitHub and connect at share.streamlit.io
 """
 
+import csv
 import io
+import textwrap
 
+import matplotlib
+import matplotlib.ticker
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import streamlit as st
 from matplotlib.gridspec import GridSpec
 from PIL import Image
 
-from analyser import analyse_image, AnalysisResult
-from metrics import coverage_percent, uniformity_score, effectiveness_score
+from analyser import (DEFAULT_CARD_HEIGHT_MM, DEFAULT_CARD_WIDTH_MM,
+                      DEFAULT_MIN_DIAMETER_PX, DEFAULT_THRESHOLD,
+                      analyse_image, calibrate_from_card, upscale_for_display)
+from metrics import DepositMetrics, cumulative_volume_curve, summarise
 
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
+APP_VERSION = "2.0"
+LOGO_URL = "https://www.desangosse.co.uk/assets/images/desangosse-logo-final.svg"
+LABELS = ["No Adjuvant", "With Adjuvant"]
+COLOURS = ["#8f9397", "#4cbd89"]   # grey = no adjuvant, teal = with
 
-METRIC_KEYS = [
-    ("coverage",   "Coverage %",     lambda v: f"{v:.1f} %"),
-    ("droplets",   "Droplets",       lambda v: str(int(v))),
-    ("mean_diam",  "Mean diam (px)", lambda v: f"{v:.1f}"),
-    ("uniformity", "Uniformity",     lambda v: f"{v:.3f}"),
-    ("score",      "Eff. Score",     lambda v: f"{v:.1f}"),
+# (attribute, label, format, "higher is better"? None = no judgement)
+ROWS = [
+    ("coverage_pct",    "Coverage",                 "{:.1f} %",  True),
+    ("density_per_cm2", "Droplet density",          "{:.1f} /cm²", None),
+    ("droplet_count",   "Droplets (after split)",   "{:d}",      None),
+    ("stain_count",     "Stains (as seen)",         "{:d}",      None),
+    ("merged_pct",      "Coverage in merged stains", "{:.0f} %", None),
+    ("dv10_um",         "Dv0.1",                    "{:.0f} µm", None),
+    ("dv50_um",         "Dv0.5 (VMD)",              "{:.0f} µm", None),
+    ("dv90_um",         "Dv0.9",                    "{:.0f} µm", None),
+    ("nmd_um",          "NMD",                      "{:.0f} µm", None),
+    ("relative_span",   "Relative span",            "{:.2f}",    False),
+    ("coverage_cv_pct", "Coverage CV (unevenness)", "{:.0f} %",  False),
 ]
 
-BIN_LABELS = ["Small (<20 px)", "Medium (20–50 px)", "Large (≥50 px)"]
-BAR_COLORS = ["#8f9397", "#4cbd89"]   # grey = No Adjuvant, teal = With Adjuvant
 
-LOGO_URL = "https://www.desangosse.co.uk/assets/images/desangosse-logo-final.svg"
-APP_VERSION = "1.1"
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def load_image(uploaded_file) -> np.ndarray:
-    return np.array(Image.open(uploaded_file).convert("RGB"), dtype=np.uint8)
+def fmt(metrics: DepositMetrics | None, attr: str, pattern: str) -> str:
+    if metrics is None:
+        return "—"
+    return pattern.format(getattr(metrics, attr))
 
 
-def compute_metrics(result: AnalysisResult, grid_n: int) -> dict:
-    cov = coverage_percent(result.contacted_mask, result.leaf_mask)
-    uni = uniformity_score(result.contacted_mask, result.leaf_mask, grid_n)
-    eff = effectiveness_score(cov, uni)
-    return {
-        "coverage":   cov,
-        "droplets":   result.droplet_count,
-        "mean_diam":  result.mean_diameter,
-        "uniformity": uni,
-        "score":      eff,
-        "bins":       result.size_bins,
-    }
+@st.cache_data(max_entries=8, show_spinner=False)
+def load_image(data: bytes) -> np.ndarray:
+    return np.array(Image.open(io.BytesIO(data)).convert("RGB"),
+                    dtype=np.uint8)
 
 
-def build_report_png(images_rgb, results, computed, grid_n: int) -> bytes:
-    fig = plt.figure(figsize=(15, 8))
-    gs  = GridSpec(2, 3, figure=fig, hspace=0.45, wspace=0.30)
-    panel_labels = ["No Adjuvant", "With Adjuvant"]
+@st.cache_data(max_entries=8, show_spinner="Analysing card…")
+def run_analysis(data: bytes, threshold: float, min_d: float, split: bool):
+    return analyse_image(load_image(data), threshold, min_d, split)
 
-    for slot in range(2):
-        ax_orig = fig.add_subplot(gs[0, slot])
-        if images_rgb[slot] is not None:
-            ax_orig.imshow(images_rgb[slot])
-        ax_orig.set_title(f"{panel_labels[slot]} — Original", fontsize=9)
-        ax_orig.axis("off")
 
-        ax_ov = fig.add_subplot(gs[1, slot])
-        if results[slot] is not None:
-            ax_ov.imshow(results[slot].overlay_image)
-        ax_ov.set_title(f"{panel_labels[slot]} — Overlay", fontsize=9)
-        ax_ov.axis("off")
+def comparison_rows(computed):
+    rows = []
+    for attr, label, pattern, _ in ROWS:
+        row = {"Metric": label}
+        for slot, name in enumerate(LABELS):
+            row[name] = fmt(computed[slot], attr, pattern)
+        if computed[0] and computed[1]:
+            a, b = getattr(computed[0], attr), getattr(computed[1], attr)
+            if pattern.endswith("%"):
+                row["Change"] = f"{b - a:+.0f} pts"
+            else:
+                row["Change"] = f"{(b - a) / a:+.0%}" if a else "—"
+        rows.append(row)
+    return rows
+
+
+def volume_chart(computed, diameters_um, ax):
+    for slot, (name, col) in enumerate(zip(LABELS, COLOURS)):
+        m = computed[slot]
+        if m is None:
+            continue
+        d, cum = cumulative_volume_curve(diameters_um[slot])
+        if d.size:
+            ax.step(d, cum, where="post", color=col, label=name, lw=2)
+            ax.axvline(m.dv50_um, color=col, ls="--", lw=1)
+    ax.axhline(50, color="#dfe2e5", lw=1, zorder=0)
+    ax.set_xscale("log")
+    ax.xaxis.set_major_locator(matplotlib.ticker.LogLocator(subs=(1, 2, 5)))
+    ax.xaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(
+        lambda v, _: f"{v:,.0f}"))
+    ax.xaxis.set_minor_formatter(matplotlib.ticker.NullFormatter())
+    ax.set_xlabel("Stain diameter (µm)")
+    ax.set_ylabel("Cumulative spray volume (%)")
+    ax.set_ylim(0, 100)
+    ax.set_title("Volume distribution (dashed = Dv0.5)", fontsize=10)
+    ax.legend(fontsize=8, loc="lower right")
+
+
+def build_report_png(images, results, computed, diameters_um) -> bytes:
+    fig = plt.figure(figsize=(13, 9))
+    gs = GridSpec(2, 3, figure=fig, hspace=0.25, wspace=0.15,
+                  width_ratios=[1, 1, 2.6])
+    for slot, name in enumerate(LABELS):
+        for row, (img, title) in enumerate([
+                (images[slot], "Original"),
+                (results[slot].overlay_image if results[slot] else None,
+                 "Detected")]):
+            ax = fig.add_subplot(gs[row, slot])
+            if img is not None:
+                ax.imshow(img)
+            ax.set_title(f"{name} — {title}", fontsize=9)
+            ax.axis("off")
 
     ax_txt = fig.add_subplot(gs[0, 2])
     ax_txt.axis("off")
-    lines = ["Metrics Comparison", ""]
-    lines.append(f"{'Metric':<18}  {'No Adj.':>9}  {'With Adj.':>9}")
-    lines.append("─" * 42)
-    for key, label, fmt in METRIC_KEYS:
-        v0 = fmt(computed[0][key]) if computed[0] else "—"
-        v1 = fmt(computed[1][key]) if computed[1] else "—"
-        lines.append(f"{label:<18}  {v0:>9}  {v1:>9}")
-    ax_txt.text(0.05, 0.95, "\n".join(lines), transform=ax_txt.transAxes,
-                fontsize=8.5, verticalalignment="top", fontfamily="monospace")
+    lines = [f"{'Metric':<26}{'No adj.':>12}{'With adj.':>12}", "─" * 50]
+    for attr, label, pattern, _ in ROWS:
+        lines.append(f"{label:<26}{fmt(computed[0], attr, pattern):>12}"
+                     f"{fmt(computed[1], attr, pattern):>12}")
+    ax_txt.text(0, 1, "\n".join(lines), transform=ax_txt.transAxes,
+                fontsize=8, va="top", family="monospace")
+    notes = []
+    for slot, name in enumerate(LABELS):
+        for w in (computed[slot].warnings if computed[slot] else []):
+            notes.append(f"{name}: {w}")
+    if notes:
+        wrapped = "\n".join(textwrap.fill(n, 95) for n in notes)
+        ax_txt.text(0, 0.38, wrapped, transform=ax_txt.transAxes,
+                    fontsize=7, va="top", color="#a05a00")
 
-    ax_chart = fig.add_subplot(gs[1, 2])
-    x = np.arange(3)
-    w = 0.35
-    for slot, (name, color) in enumerate(zip(panel_labels, BAR_COLORS)):
-        if results[slot] is not None:
-            ax_chart.bar(x + (slot - 0.5) * w, results[slot].size_bins,
-                         w, label=name, color=color, alpha=0.85)
-    ax_chart.set_xticks(x)
-    ax_chart.set_xticklabels(["Small", "Medium", "Large"], fontsize=8)
-    ax_chart.set_title("Droplet Size Distribution", fontsize=9)
-    ax_chart.legend(fontsize=8)
-
-    fig.suptitle("WSP Adjuvant Effectiveness Analysis Report",
-                 fontsize=13, fontweight="bold", color="#0C6951")
-
+    volume_chart(computed, diameters_um, fig.add_subplot(gs[1, 2]))
+    fig.suptitle("WSP Adjuvant Analysis Report", fontsize=13,
+                 fontweight="bold", color="#0C6951")
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
     plt.close(fig)
-    buf.seek(0)
-    return buf.read()
+    return buf.getvalue()
+
+
+def build_csv(computed) -> bytes:
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["metric", "no_adjuvant", "with_adjuvant"])
+    for attr, *_ in ROWS + [("um_per_px", None, None, None)]:
+        w.writerow([attr] + [round(getattr(m, attr), 3) if m else ""
+                             for m in computed])
+    return buf.getvalue().encode()
 
 
 # ---------------------------------------------------------------------------
@@ -117,175 +158,122 @@ def build_report_png(images_rgb, results, computed, grid_n: int) -> bytes:
 # ---------------------------------------------------------------------------
 
 st.set_page_config(page_title="WSP Adjuvant Analyser", layout="wide")
-
 st.markdown("""
 <style>
-/* Branded top accent bar on main content */
-.brand-header {
-    border-top: 4px solid #4cbd89;
-    padding: 0.75rem 0 0.5rem 0;
-    margin-bottom: 0.5rem;
-    display: flex;
-    align-items: center;
-    gap: 1.5rem;
-}
-/* Metric card tinting */
-[data-testid="stMetric"] {
-    background: #f0f4f2;
-    border-radius: 8px;
-    padding: 0.6rem 1rem !important;
-}
-/* Subtle section divider label */
-.section-label {
-    font-size: 0.78rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: #8f9397;
-    margin-bottom: 0.25rem;
-}
-/* Footer */
-.ds-footer {
-    margin-top: 2.5rem;
-    border-top: 1px solid #dfe2e5;
-    padding-top: 0.75rem;
-    font-size: 0.78rem;
-    color: #8f9397;
-    text-align: center;
-}
+.brand-header { border-top: 4px solid #4cbd89; padding: .75rem 0 .5rem;
+  margin-bottom: .5rem; display: flex; align-items: center; gap: 1.5rem; }
+.ds-footer { margin-top: 2.5rem; border-top: 1px solid #dfe2e5;
+  padding-top: .75rem; font-size: .78rem; color: #8f9397; text-align: center; }
 </style>
 """, unsafe_allow_html=True)
-
 st.markdown(f"""
 <div class="brand-header">
   <img src="{LOGO_URL}" height="54" alt="De Sangosse">
   <div>
-    <div style="font-size:1.6rem;font-weight:700;color:#343a40;line-height:1.2;">
-        Adjuvant Spray Analyser
-    </div>
-    <div style="font-size:0.9rem;color:#8f9397;">Water-Sensitive Paper (WSP) Analysis</div>
+    <div style="font-size:1.6rem;font-weight:700;color:#343a40;">Adjuvant Spray Analyser</div>
+    <div style="font-size:.9rem;color:#8f9397;">Water-Sensitive Paper (WSP) Analysis</div>
   </div>
 </div>
 """, unsafe_allow_html=True)
 
-# --- Sidebar controls -------------------------------------------------------
 with st.sidebar:
-    st.markdown(
-        f'<img src="{LOGO_URL}" style="width:100%;max-width:160px;margin-bottom:0.75rem;" alt="De Sangosse">',
-        unsafe_allow_html=True,
-    )
-    st.markdown("---")
-    st.header("Parameters")
-    threshold = st.slider("Threshold", min_value=5, max_value=100, value=30)
-    grid_n    = st.number_input("Grid size", min_value=4, max_value=16,
-                                value=8, step=2)
-    st.markdown("---")
-    st.caption("Threshold controls minimum colour saturation for blue-droplet detection. "
-               "Grid size sets uniformity resolution.")
+    st.header("Card size")
+    st.caption("Photos must be cropped to the card edges. "
+               "Standard cards are 26 × 76 mm.")
+    card_w = st.number_input("Width (mm)", 5.0, 300.0,
+                             DEFAULT_CARD_WIDTH_MM, 1.0)
+    card_h = st.number_input("Height (mm)", 5.0, 300.0,
+                             DEFAULT_CARD_HEIGHT_MM, 1.0)
 
-# --- Image upload -----------------------------------------------------------
+    st.header("Detection")
+    threshold = st.slider(
+        "Sensitivity threshold", 10, 80, DEFAULT_THRESHOLD,
+        help="Colour difference from the paper needed to count as a stain. "
+             "Lower picks up fainter stains but also smudges and shadows.")
+    min_d = st.slider(
+        "Ignore stains smaller than (px)", 1.0, 6.0,
+        DEFAULT_MIN_DIAMETER_PX, 0.5,
+        help="Noise floor. Check the overlay: raise it if specks of dirt "
+             "are being counted.")
+    split = st.checkbox(
+        "Separate overlapping stains", True,
+        help="Splits merged stains at their narrow points so droplets are "
+             "counted individually.")
+
+    st.header("Reporting")
+    cell_mm = st.slider("Evenness cell size (mm)", 2.0, 13.0, 5.0, 0.5)
+    spread = st.number_input(
+        "Spread factor", 1.0, 3.0, 1.0, 0.05,
+        help="Stains are bigger than the droplets that made them. Leave at "
+             "1.0 to report stain sizes; set it if you have a calibrated "
+             "factor for your paper and liquid.")
+
 col1, col2 = st.columns(2)
-with col1:
-    st.subheader("Paper 1 — No Adjuvant")
-    upload1 = st.file_uploader("Upload image 1",
-                               type=["jpg", "jpeg", "png", "bmp", "tiff", "tif"],
-                               key="upload1", label_visibility="collapsed")
-with col2:
-    st.subheader("Paper 2 — With Adjuvant")
-    upload2 = st.file_uploader("Upload image 2",
-                               type=["jpg", "jpeg", "png", "bmp", "tiff", "tif"],
-                               key="upload2", label_visibility="collapsed")
+uploads = []
+for col, name, key in [(col1, LABELS[0], "u1"), (col2, LABELS[1], "u2")]:
+    with col:
+        st.subheader(name)
+        uploads.append(st.file_uploader(
+            name, type=["jpg", "jpeg", "png", "bmp", "tif", "tiff"],
+            key=key, label_visibility="collapsed"))
 
-# --- Load & analyse ---------------------------------------------------------
-images_rgb = [None, None]
-results    = [None, None]
+images, results, computed = [None, None], [None, None], [None, None]
+diameters_um = [None, None]
+for slot, upload in enumerate(uploads):
+    if upload is None:
+        continue
+    data = upload.getvalue() if hasattr(upload, "getvalue") else upload.read()
+    img = load_image(data)
+    cal = calibrate_from_card(img.shape[1], img.shape[0], card_w, card_h)
+    res = run_analysis(data, threshold, min_d, split)
+    m = summarise(res, cal, cell_mm, spread)
+    images[slot], results[slot], computed[slot] = img, res, m
+    diameters_um[slot] = res.diameters_px * cal.um_per_px / spread
 
-for slot, upload in enumerate([upload1, upload2]):
-    if upload is not None:
-        images_rgb[slot] = load_image(upload)
-        results[slot]    = analyse_image(images_rgb[slot], threshold=threshold)
+if not any(results):
+    st.info("Upload a scan or photo of a sprayed card to start. "
+            "Upload both to compare.")
+else:
+    cols = st.columns(2)
+    for slot, col in enumerate(cols):
+        if results[slot] is None:
+            continue
+        with col:
+            show = upscale_for_display(
+                np.hstack([results[slot].image_rgb,
+                           np.full((results[slot].image_rgb.shape[0], 4, 3),
+                                   255, np.uint8),
+                           results[slot].overlay_image]))
+            st.image(show, caption="Original | Detected (red = droplet edges)",
+                     width="stretch")
+            for w in computed[slot].warnings:
+                st.warning(w)
 
-# --- Display images ---------------------------------------------------------
-if any(r is not None for r in results):
-    st.markdown("---")
-    img_col1, img_col2 = st.columns(2)
-    panels = [img_col1, img_col2]
-    labels = ["No Adjuvant", "With Adjuvant"]
-
-    for slot, (panel, label) in enumerate(zip(panels, labels)):
-        with panel:
-            if images_rgb[slot] is not None:
-                st.image(images_rgb[slot], caption=f"{label} — Original",
-                         width=400)
-                st.image(results[slot].overlay_image,
-                         caption=f"{label} — Overlay",
-                         width=400)
-
-    # --- Metrics cards ------------------------------------------------------
     st.markdown("---")
     st.subheader("Results")
+    st.table(comparison_rows(computed))
 
-    computed = [None, None]
-    for slot in range(2):
-        if results[slot] is not None:
-            computed[slot] = compute_metrics(results[slot], int(grid_n))
-
-    st.markdown('<div class="section-label">Paper 1 — No Adjuvant</div>', unsafe_allow_html=True)
-    cols = st.columns(len(METRIC_KEYS))
-    for col, (key, label, fmt) in zip(cols, METRIC_KEYS):
-        col.metric(label, fmt(computed[0][key]) if computed[0] else "—")
-
-    st.markdown('<div class="section-label">Paper 2 — With Adjuvant</div>', unsafe_allow_html=True)
-    cols = st.columns(len(METRIC_KEYS))
-    for col, (key, label, fmt) in zip(cols, METRIC_KEYS):
-        v1 = computed[1][key] if computed[1] else None
-        v0 = computed[0][key] if computed[0] else None
-        delta_str = None
-        if v1 is not None and v0 is not None:
-            delta_str = f"{v1 - v0:+.1f}"
-        col.metric(label, fmt(v1) if v1 is not None else "—", delta=delta_str)
-
-    # Highlight which image scored better
     if computed[0] and computed[1]:
-        s0, s1 = computed[0]["score"], computed[1]["score"]
-        if s1 > s0:
-            st.success(f"With Adjuvant scores higher ({s1:.1f} vs {s0:.1f})")
-        elif s0 > s1:
-            st.warning(f"No Adjuvant scores higher ({s0:.1f} vs {s1:.1f})")
-        else:
-            st.info("Both images score equally.")
+        a, b = computed
+        st.markdown(
+            f"**Coverage** {a.coverage_pct:.0f}% → {b.coverage_pct:.0f}%. "
+            f"**Coverage in merged stains** {a.merged_pct:.0f}% → "
+            f"{b.merged_pct:.0f}%: a big rise usually means droplets are "
+            f"spreading further on contact, which is what most adjuvants "
+            f"are for.")
 
-    # --- Droplet size chart -------------------------------------------------
-    fig, ax = plt.subplots(figsize=(6, 3.5))
-    x = np.arange(3)
-    w = 0.35
-    for slot, (name, color) in enumerate(zip(labels, BAR_COLORS)):
-        if computed[slot]:
-            ax.bar(x + (slot - 0.5) * w, computed[slot]["bins"],
-                   w, label=name, color=color, alpha=0.85)
-    ax.set_xticks(x)
-    ax.set_xticklabels(BIN_LABELS, fontsize=8)
-    ax.set_title("Droplet Size Distribution")
-    ax.set_ylabel("Count")
-    ax.legend()
+    fig, ax = plt.subplots(figsize=(7, 3.5))
+    volume_chart(computed, diameters_um, ax)
     fig.tight_layout()
     st.pyplot(fig)
     plt.close(fig)
 
-    # --- Download report ----------------------------------------------------
-    st.markdown("---")
-    report_bytes = build_report_png(images_rgb, results, computed, int(grid_n))
-    st.download_button(
-        label="Download Report (PNG)",
-        data=report_bytes,
-        file_name="wsp_adjuvant_report.png",
-        mime="image/png",
-    )
+    c1, c2 = st.columns(2)
+    c1.download_button("Download report (PNG)",
+                       build_report_png(images, results, computed, diameters_um),
+                       "wsp_adjuvant_report.png", "image/png")
+    c2.download_button("Download figures (CSV)", build_csv(computed),
+                       "wsp_adjuvant_metrics.csv", "text/csv")
 
-else:
-    st.info("Upload at least one WSP image above to begin analysis.")
-
-st.markdown(
-    f'<div class="ds-footer">De Sangosse WSP Adjuvant Analysis Tool &nbsp;·&nbsp; v{APP_VERSION}</div>',
-    unsafe_allow_html=True,
-)
+st.markdown(f'<div class="ds-footer">De Sangosse WSP Adjuvant Analysis Tool'
+            f' &nbsp;·&nbsp; v{APP_VERSION}</div>', unsafe_allow_html=True)
